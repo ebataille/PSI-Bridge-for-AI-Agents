@@ -221,11 +221,59 @@ is per-project, since the token is.
 
 Flags: `--project-hooks` (hooks in the current project instead), `--no-hooks` (MCP only).
 
-Verify with `/mcp` — you should see **8 tools** under `idebridge`.
+Verify with `/mcp` — you should see **16 tools** under `idebridge`.
 
 > **Never name this server `ide`.** Claude Code reserves that name for its own native IDE
 > integration. A server registered under it simply vanishes behind that one: `/mcp` then shows a
 > lone `mcp__ide__getDiagnostics` and you conclude the bridge is broken.
+
+### Steer the agent toward them
+
+Registering the server is not enough. A model reaches for `grep` and `sed` because that is what it
+has always had; the tool descriptions push back, but the instruction file is what actually decides.
+Paste this into your `CLAUDE.md` (project or global) — or the equivalent for your client:
+
+````markdown
+## IDE tools — MCP `idebridge`
+
+When `idebridge` is connected, **its tools come before their shell or generic equivalents**. They
+run on the IDE index and the already-warm language service: they see resolved references and real
+types, not textual matches.
+
+| Need                                | Use                                    | Instead of                                  |
+| ----------------------------------- | -------------------------------------- | ------------------------------------------- |
+| Understand a file you have not read | `get_outline`, then read the lines it returns | reading the whole file                |
+| Type errors, inspections            | `get_diagnostics`                      | `tsc --noEmit`, `eslint`                    |
+| Fix an error the IDE already flags  | `apply_quick_fix` (batch several)      | editing each error by hand                  |
+| References to a symbol              | `find_usages`                          | `grep` on the name                          |
+| Concrete implementations            | `find_implementations`                 | `find_usages` on an interface               |
+| Who calls this, transitively        | `find_callers`                         | chaining `find_usages` level by level       |
+| Signature, inferred type            | `get_type_info`                        | reading the code and deducing               |
+| Rename a symbol                     | `rename_symbol`                        | `sed`, or one `Edit` per file               |
+| Reshape an expression project-wide  | `structural_replace` (`dry_run` first) | `grep` followed by a series of edits        |
+| Move or rename a file               | `move_file`                            | `mv` / `git mv`, which break the imports    |
+| Remove dead code                    | `safe_delete`                          | deleting the lines and hoping               |
+| Tidy up before committing           | `optimize_imports` + `format_code` with `scope: changed` | doing it by hand          |
+
+Limits — do not over-apply:
+
+- `grep` is still the right tool for what is **not a symbol**: string literals, config keys,
+  `.json` / `.md` / `.yml`, TODOs, exploratory search.
+- `sed` / `mv` stay legitimate **outside source code** (generated files, fixtures, scripts) and for
+  bulk substitutions that are not a symbol rename.
+- `structural_replace` is **not** a rename: it rewrites the matched expressions and leaves the
+  declaration and the imports alone. Use `rename_symbol` when the target is a symbol.
+- The `PostToolUse` hook already reports diagnostics after `Edit` / `Write`: do not re-run
+  `get_diagnostics` on the same file without a reason. Do run it after `rename_symbol`,
+  `move_file`, `apply_quick_fix` or `structural_replace`, which the hook does not cover.
+- Unsure whether the tools are usable (IDE closed, indexing in progress) → `ide_status` before
+  concluding that one is broken.
+- If `idebridge` is not connected, fall back to the shell equivalents without asking.
+````
+
+The two rows that change the most are the first and the last: reading an outline before a file is
+where the token budget is won, and running the style tools on `scope: changed` is what keeps the
+diff reviewable.
 
 ### If your agent runs in WSL
 
