@@ -1,0 +1,11 @@
+<idea-plugin>
+    <!-- id / name / version / vendor / ideaVersion are injected by the Gradle build. -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>JavaScript</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <httpRequestHandler implementation="dev.ebataille.idebridge.server.BridgeHttpHandler"/>
+        <postStartupActivity implementation="dev.ebataille.idebridge.startup.BridgeStartup"/>
+        <notificationGroup id="Claude IDE Bridge" displayType="BALLOON"/>
+    </extensions>
+</idea-plugin>

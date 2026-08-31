@@ -1,0 +1,17 @@
+# Build output
+.gradle/
+build/
+out/
+.intellijPlatform/
+*.iml
+
+# IDE settings: regenerated from the Gradle model, and machine-specific
+.idea/
+
+# Bridge descriptor: holds a per-project secret token
+.claude/ide-bridge.json
+.claude/ide-bridge.url
+testdata/.claude/
+
+# Local archive of the hooks; the source of truth is hooks/
+hooks.zip
