@@ -136,8 +136,8 @@ few words.
 - An MCP client — Claude Code, or any other
 - Node.js, for the setup and hook scripts (already present if you run Claude Code)
 
-No system JDK needed to build: the Gradle build borrows the JBR shipped with WebStorm. Adjust
-`org.gradle.java.home` in `gradle.properties` if yours lives elsewhere.
+No system JDK needed to build: `build.sh` falls back to the JBR shipped with a locally installed
+JetBrains IDE, which is a full JDK 21. Set `JAVA_HOME` to override.
 
 ## Install
 
@@ -162,9 +162,12 @@ cd PSI-Bridge-for-AI-Agents
 # build/distributions/idebridge-0.1.0.zip
 ```
 
-Then install that zip the same way. `build.sh` borrows the JBR shipped with WebStorm, so no
-system JDK is required; point `org.gradle.java.home` in `gradle.properties` at your own IDE
-installation if it lives elsewhere.
+Then install that zip the same way. `build.sh` resolves a JDK 21 for you: it honours `JAVA_HOME`
+when set, and otherwise borrows the JBR shipped with a locally installed JetBrains IDE — a
+complete JDK — so no separate install is needed just to build.
+
+Releases are built by CI: pushing a `v*` tag runs `.github/workflows/release.yml`, which builds
+the plugin and attaches the zip to the release.
 
 **Updating**: install the new zip over the old one and restart. Settings and the per-project
 token are preserved, so your MCP registration keeps working.
