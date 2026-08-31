@@ -1,13 +1,7 @@
 package dev.ebataille.idebridge.tools
 
 import com.google.gson.JsonObject
-import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
-import com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerImpl
-import com.intellij.codeInsight.daemon.impl.DaemonProgressIndicator
 import com.intellij.codeInsight.daemon.impl.HighlightInfo
-import com.intellij.codeInsight.daemon.impl.HighlightingSessionImpl
-import com.intellij.codeInsight.multiverse.CodeInsightContext
-import com.intellij.codeInsight.multiverse.CodeInsightContextManager
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.lang.javascript.integration.JSAnnotationError
 import com.intellij.lang.typescript.compiler.TypeScriptService
@@ -17,18 +11,16 @@ import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
-import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.roots.ProjectFileIndex
-import com.intellij.openapi.util.ProperTextRange
-import com.intellij.openapi.vcs.changes.ChangeListManager
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
+import dev.ebataille.idebridge.core.Highlighting
 import dev.ebataille.idebridge.core.Locations
+import dev.ebataille.idebridge.core.Scopes
 import dev.ebataille.idebridge.server.Args
 import dev.ebataille.idebridge.server.Schema
 import java.util.concurrent.Future
@@ -52,6 +44,9 @@ object DiagnosticsTool : BridgeTool {
 
     private const val MAX_FILES = 60
 
+    /** Past two or three, the fix list is noise the model has to read on every diagnostic. */
+    private const val MAX_FIXES_PER_ROW = 3
+
     /** Past this point, better to return the other diagnostics than to block on tsserver. */
     private const val TYPESCRIPT_TIMEOUT_SECONDS = 60L
 
@@ -74,16 +69,8 @@ object DiagnosticsTool : BridgeTool {
             "in the editor, and it waits for the analysis to finish before answering."
 
     override val inputSchema = Schema.obj(
-        "paths" to Schema.arrayOf(
-            "Files to analyse, absolute or project-relative. Takes precedence over scope.",
-            Schema.string("path"),
-        ),
-        "scope" to Schema.enumOf(
-            "Used when paths is empty. changed = files modified according to VCS (default), " +
-                "open = files open in the editor.",
-            "changed",
-            "open",
-        ),
+        "paths" to Schema.arrayOf(Scopes.PATHS_DESCRIPTION, Schema.string("path")),
+        "scope" to Schema.enumOf(Scopes.SCOPE_DESCRIPTION, "changed", "open"),
         "min_severity" to Schema.enumOf(
             "Severity threshold. Default: warning.",
             "error",
@@ -91,6 +78,10 @@ object DiagnosticsTool : BridgeTool {
             "weak_warning",
         ),
         "max_results" to Schema.integer("Maximum diagnostics returned. Default: 100."),
+        "with_fixes" to Schema.boolean(
+            "List the IDE quick fixes available on each diagnostic, ready to be handed to " +
+                "apply_quick_fix. Default: true.",
+        ),
     )
 
     override fun call(context: ToolContext, args: JsonObject): String {
@@ -105,6 +96,7 @@ object DiagnosticsTool : BridgeTool {
             else -> HighlightSeverity.WARNING
         }
         val maxResults = Args.int(args, "max_results", 100)
+        val withFixes = Args.boolean(args, "with_fixes", true)
         val targets = targets(context, args)
 
         if (targets.isEmpty()) {
@@ -136,7 +128,7 @@ object DiagnosticsTool : BridgeTool {
             }
             analyzed++
             listOf(
-                highlightRows(context, project, file, psiFile),
+                highlightRows(context, project, file, psiFile, withFixes),
                 typeScriptRows(context, project, file, psiFile),
             ).forEach { outcome ->
                 rows += outcome.rows
@@ -159,9 +151,8 @@ object DiagnosticsTool : BridgeTool {
         project: Project,
         file: VirtualFile,
         psiFile: PsiFile,
+        withFixes: Boolean,
     ): SourceOutcome {
-        val analyzer = DaemonCodeAnalyzer.getInstance(project) as? DaemonCodeAnalyzerImpl
-            ?: return SourceOutcome(emptyList(), "the IDE analysis engine is unavailable")
         val document = ReadAction.compute<Document?, RuntimeException> {
             FileDocumentManager.getInstance().getDocument(file)
         } ?: return SourceOutcome(
@@ -169,29 +160,8 @@ object DiagnosticsTool : BridgeTool {
             "content unreadable by the IDE (${context.display(file)})",
         )
 
-        // The passes look for the highlighting session attached to the current indicator: outside
-        // an editor nobody created one, so we open it ourselves. And runMainPasses rejects any
-        // indicator that is not a DaemonProgressIndicator.
-        val insightContext = ReadAction.compute<CodeInsightContext, RuntimeException> {
-            CodeInsightContextManager.getInstance(project).getCodeInsightContext(psiFile.viewProvider)
-        }
-        val indicator = DaemonProgressIndicator()
-        var infos: List<HighlightInfo> = emptyList()
-        try {
-            ProgressManager.getInstance().runProcess(
-                {
-                    HighlightingSessionImpl.runInsideHighlightingSession(
-                        psiFile,
-                        insightContext,
-                        null,
-                        ProperTextRange(0, document.textLength),
-                        false,
-                    ) {
-                        infos = analyzer.runMainPasses(psiFile, document, indicator)
-                    }
-                },
-                indicator,
-            )
+        val infos: List<HighlightInfo> = try {
+            Highlighting.analyse(project, psiFile, document)
         } catch (e: Throwable) {
             LOG.warn("Highlighting analysis failed on ${file.path}", e)
             // This failure has to reach the response: otherwise a broken source reads as an
@@ -203,18 +173,32 @@ object DiagnosticsTool : BridgeTool {
             )
         }
 
-        val rows = infos.mapNotNull { info ->
-            val message = clean(info.description ?: info.toolTip ?: return@mapNotNull null)
-            if (message.isBlank()) {
-                return@mapNotNull null
+        val rows = ReadAction.compute<List<Row>, RuntimeException> {
+            infos.mapNotNull { info ->
+                val message = clean(info.description ?: info.toolTip ?: return@mapNotNull null)
+                if (message.isBlank()) {
+                    return@mapNotNull null
+                }
+                Row(
+                    path = context.display(file),
+                    line = Locations.lineOf(document, info.startOffset),
+                    column = Locations.columnOf(document, info.startOffset),
+                    severity = info.severity,
+                    message = message,
+                    // Reading the labels here is free - the analysis already built the actions -
+                    // and it spares the model a round trip to ask what it could do about the
+                    // error it is being shown.
+                    fixes = if (withFixes) {
+                        Highlighting.fixes(info)
+                            .map { Highlighting.label(it.action) }
+                            .filter { it.isNotBlank() }
+                            .distinct()
+                            .take(MAX_FIXES_PER_ROW)
+                    } else {
+                        emptyList()
+                    },
+                )
             }
-            Row(
-                path = context.display(file),
-                line = Locations.lineOf(document, info.startOffset),
-                column = Locations.columnOf(document, info.startOffset),
-                severity = info.severity,
-                message = message,
-            )
         }
         return SourceOutcome(rows, null)
     }
@@ -310,26 +294,12 @@ object DiagnosticsTool : BridgeTool {
     }
 
     private fun targets(context: ToolContext, args: JsonObject): List<VirtualFile> {
-        val project = context.project
-        val explicit = Args.stringList(args, "paths")
-        if (explicit.isNotEmpty()) {
-            return explicit.mapNotNull { Locations.findFile(project, it) }.filter { !it.isDirectory }
-        }
-
-        val open = FileEditorManager.getInstance(project).openFiles.toList()
-        if (Args.string(args, "scope") == "open") {
-            return open
-        }
-
-        val index = ProjectFileIndex.getInstance(project)
-        val changed = ReadAction.compute<List<VirtualFile>, RuntimeException> {
-            ChangeListManager.getInstance(project).affectedFiles
-                .filter { it.isValid && !it.isDirectory && index.isInContent(it) }
-        }
-        if (changed.isNotEmpty()) {
-            return changed
-        }
-        return open
+        return Scopes.resolve(
+            context.project,
+            Args.stringList(args, "paths"),
+            Args.string(args, "scope"),
+            MAX_FILES,
+        )
     }
 
     private fun render(
@@ -376,9 +346,12 @@ object DiagnosticsTool : BridgeTool {
         shown.forEach { row ->
             out.append("${row.path}:${row.line}:${row.column}".padEnd(width))
                 .append("  ")
-                .append(label(row.severity).padEnd(12))
+                .append(label(row.severity).padEnd(14))
                 .append(row.message)
                 .append('\n')
+            row.fixes.forEach { fix ->
+                out.append(" ".repeat(width + 2)).append("fix: ").append(fix).append('\n')
+            }
         }
 
         val others = rows.size - errors
@@ -391,6 +364,12 @@ object DiagnosticsTool : BridgeTool {
             out.append(" - ${sorted.size - shown.size} diagnostic(s) not shown")
         }
         out.append('.')
+        if (shown.any { it.fixes.isNotEmpty() }) {
+            out.append(
+                "\nThe `fix:` lines are IDE quick fixes: apply_quick_fix applies any number of " +
+                    "them in a single call, at the file:line shown on the diagnostic.",
+            )
+        }
         out.append(caveat)
         return out.toString()
     }
@@ -409,6 +388,7 @@ object DiagnosticsTool : BridgeTool {
         val column: Int,
         val severity: HighlightSeverity,
         val message: String,
+        val fixes: List<String> = emptyList(),
     )
 
     /** Result of one diagnostics source, with the reason for any silence. */

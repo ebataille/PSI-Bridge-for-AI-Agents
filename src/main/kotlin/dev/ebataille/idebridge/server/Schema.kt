@@ -85,6 +85,15 @@ object Args {
         return value.asBoolean
     }
 
+    /** Batch tools take a list of records, so that N operations cost one round trip. */
+    fun objectList(args: JsonObject, key: String): List<JsonObject> {
+        val value = args.get(key) ?: return emptyList()
+        if (!value.isJsonArray) {
+            return emptyList()
+        }
+        return value.asJsonArray.mapNotNull { if (it.isJsonObject) it.asJsonObject else null }
+    }
+
     fun stringList(args: JsonObject, key: String): List<String> {
         val value = args.get(key) ?: return emptyList()
         if (!value.isJsonArray) {
