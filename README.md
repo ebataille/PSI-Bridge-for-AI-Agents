@@ -51,15 +51,41 @@ structural.
 
 ### The tools
 
+**Reading — spend fewer tokens, and be right**
+
 | Tool | What it replaces |
 |---|---|
-| `get_diagnostics` | `tsc --noEmit` — type errors (real `TS****` codes from tsserver), syntax errors, **plus** the IDE inspections tsc cannot see. Incremental, the service is already warm, and it analyses files that are **not open**. |
+| `get_diagnostics` | `tsc --noEmit` — type errors (real `TS****` codes from tsserver), syntax errors, **plus** the IDE inspections tsc cannot see. Incremental, the service is already warm, and it analyses files that are **not open**. Each diagnostic also carries the IDE quick fixes available on it. |
+| `get_outline` | reading a 2000-line file to find one function. Returns the Structure view as text — symbols and their line ranges — for a few hundred tokens, so the next read is an `offset`/`limit` over the twenty lines that matter. |
 | `find_usages` | `grep` on a symbol name — resolved references, aliases and imports included, no homonyms from other modules, no hits in comments. |
+| `find_implementations` | `find_usages` when the question is "what implements this" — goes through the type hierarchy instead of drowning the four implementors in imports and annotations. |
+| `find_callers` | one `find_usages` per level, plus reading each file to work out which function encloses the reference. Walks the call chain transitively in one call. |
+| `get_type_info` | guessing the shape of a value by reading the surrounding code. |
+
+**Changing — one call, N edits**
+
+| Tool | What it replaces |
+|---|---|
+| `apply_quick_fix` | the compile → read error → edit → recompile loop. Takes a **batch** of the `fix:` lines `get_diagnostics` printed and applies them in one call. Each is re-resolved against a fresh analysis, because every applied fix shifts the offsets of the next. |
+| `structural_replace` | `grep`, then opening twenty files to sort real matches from hits inside strings and comments, then twenty edits. Matches on the syntax tree: `$obj$.getOrder($id$)` matches across line breaks and does not match the same characters in a template literal. Defaults to `dry_run`. |
 | `rename_symbol` | search-and-replace — updates every reference and import, leaves unrelated text alone, stays undoable with a single Ctrl+Z. |
 | `move_file` | `mv` followed by hand-fixing imports — recomputes every relative import path, in both directions. |
-| `get_type_info` | guessing the shape of a value by reading the surrounding code. |
+| `safe_delete` | deleting lines and hoping the build agrees. Refuses, with the list of references, when something still uses the symbol. |
+| `optimize_imports` | pruning import blocks by hand after moving code — resolves through the real TypeScript path mapping. |
+| `format_code` | reformatting by hand, or reformatting whole files and burying a three-line fix in an 800-line diff: by default only the lines changed since the last VCS revision are touched. |
+
+**Synchronising**
+
+| Tool | What it replaces |
+|---|---|
 | `ide_refresh` / `ide_save_all` | nothing — this did not exist. |
 | `ide_status` | knowing whether the index is ready before trusting any of the above. |
+
+The batch tools (`get_diagnostics`, `get_outline`, `optimize_imports`, `format_code`,
+`apply_quick_fix`, `structural_replace`) all take either explicit `paths` or a symbolic `scope`,
+resolved identically everywhere — `changed` means the current VCS changeset. One call is meant to
+carry one complete intent: a tool that makes the model iterate, paginate or call back to refine
+costs more round trips than it saves, and a round trip is the expensive unit here, not the edit.
 
 ---
 
@@ -68,11 +94,14 @@ structural.
 Worth being precise, because it determines how far this generalises.
 
 **Language-agnostic** — these ride on the generic IntelliJ PSI and would work on any language the
-IDE supports: `find_usages`, `rename_symbol`, `move_file`, plus the syntax-and-inspections half of
-`get_diagnostics`.
+IDE supports: `find_usages`, `find_implementations`, `rename_symbol`, `move_file`, `safe_delete`,
+`get_outline` (through the same Structure view builder as the IDE panel, with a plain PSI walk as
+fallback), `optimize_imports`, `format_code`, `apply_quick_fix`, `structural_replace`, plus the
+syntax-and-inspections half of `get_diagnostics`.
 
-**TypeScript/JavaScript-specific** — `get_type_info` (via `JSTypeOwner`) and the tsserver source
-inside `get_diagnostics`.
+**TypeScript/JavaScript-specific** — `get_type_info` (via `JSTypeOwner`), the tsserver source
+inside `get_diagnostics`, and the enclosing-function detection in `find_callers`, which looks for
+a `JSFunction` first and falls back to the nearest named PSI element elsewhere.
 
 The plugin declares `<depends>JavaScript</depends>`, so it installs on IDEs that bundle the
 JavaScript plugin — WebStorm, IntelliJ IDEA Ultimate, PhpStorm, PyCharm Professional. Dropping
@@ -159,7 +188,7 @@ You will know it worked when a "PSI Bridge is running" notification appears on p
 git clone https://github.com/ebataille/PSI-Bridge-for-AI-Agents.git
 cd PSI-Bridge-for-AI-Agents
 ./build.sh buildPlugin
-# build/distributions/idebridge-0.1.0.zip
+# build/distributions/idebridge-<version>.zip
 ```
 
 Then install that zip the same way. `build.sh` resolves a JDK 21 for you: it honours `JAVA_HOME`
@@ -221,6 +250,8 @@ server/     BridgeHttpHandler   grafted onto the IDE's built-in web server
             McpServer           JSON-RPC 2.0, unary HTTP transport, no SDK
 core/       BridgeService       token -> project registry; the token is the secret
             Symbols             resolve a symbol from (file, line, column)
+            Scopes              paths | changed | open, resolved once for every batch tool
+            Highlighting        run the daemon passes off-editor, read the quick fixes
             PathMapper          WSL <-> Windows translation
 tools/      one file per tool
 startup/    BridgeStartup       publishes .claude/ide-bridge.json on open
@@ -235,7 +266,22 @@ hooks/      ide-sync.mjs        both hooks; setup-claude.mjs installs everything
 - `move_file` uses `MoveFilesOrDirectoriesProcessor.run()`, which *can* open a dialog on conflict.
 - `get_diagnostics` briefly opens each analysed file in the editor (without focus) to wake
   tsserver, then closes it. On a large batch you will see it happen.
-- `get_diagnostics` is capped at 60 files per call.
+- `get_diagnostics` is capped at 60 files per call; the layout processors at 200.
+- `apply_quick_fix` opens the target file in an editor without focus, because intentions are
+  written against an `Editor` and many of them read the caret. Files it opened are closed again
+  at the end of the batch.
+- `format_code` applies the **IDE** code style. On a front-end repo Prettier is usually the source
+  of truth, and the IDE only delegates to it when *Run Prettier on Reformat Code* is enabled — the
+  tool detects a Prettier config and says so in its answer rather than letting the CI find out.
+- `format_code` and the quick fixes apply the **IDE** code style. Without an `.editorconfig` the
+  IDE falls back to its global defaults, which routinely disagree with the indentation already in
+  the file; combined with the changed-lines-only default that leaves a file indented two ways. The
+  tool warns when no `.editorconfig` covers the files it touched.
+- `structural_replace` patterns use the IDE's own structural syntax, not a regex. Malformed
+  patterns come back with the engine's own error message. It is **not** a rename: it rewrites the
+  matched expressions and leaves the declaration and the imports alone, so renaming a symbol with
+  it produces a project that no longer compiles. Use `rename_symbol`.
+- `find_callers` reports `(module level)` when a reference sits outside any named function.
 - `HighlightingSessionImpl`, `runMainPasses` and the TypeScript service are internal platform
   APIs with no compatibility guarantee — recheck on every major IDE upgrade. Each call is
   isolated, so a signature change degrades one source rather than breaking the tool.
@@ -245,8 +291,9 @@ hooks/      ide-sync.mjs        both hooks; setup-claude.mjs installs everything
 
 ## Roadmap
 
-`apply_quick_fix`, `change_signature` with call-site propagation, `safe_delete`, `call_hierarchy`,
-test execution with structured runner results, and gutter markers on agent-touched lines.
+`change_signature` with call-site propagation — unlike rename, this has no generic
+`RefactoringFactory` entry point and has to be done per language. Then test execution with
+structured runner results, and gutter markers on agent-touched lines.
 
 ---
 

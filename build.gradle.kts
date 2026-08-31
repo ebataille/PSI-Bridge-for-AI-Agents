@@ -7,7 +7,16 @@ plugins {
 }
 
 group = "dev.ebataille"
-version = "0.1.0"
+
+// The git tag wins over this value when CI builds a release, so `git tag v0.3.0 && git push
+// --tags` is enough to ship 0.3.0: no commit whose only purpose is to bump a number, and no
+// release zip labelled with the previous version because the bump was forgotten. This constant
+// stays the version local builds carry.
+val declaredVersion = "0.2.0"
+version = System.getenv("GITHUB_REF_NAME")
+    ?.takeIf { it.matches(Regex("""v\d+\.\d+\.\d+.*""")) }
+    ?.removePrefix("v")
+    ?: declaredVersion
 
 dependencies {
     intellijPlatform {
