@@ -15,16 +15,21 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '21'
           distribution: 'temurin'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+
+      # Belt and braces: the executable bit is set in the index, but a Windows-side checkout can
+      # still lose it, and losing it fails the build with a cryptic exit code 126.
+      - name: Make wrapper executable
+        run: chmod +x gradlew
 
       # The first build downloads the WebStorm SDK (~1 GB), so allow time on a cold cache.
       - name: Build plugin
