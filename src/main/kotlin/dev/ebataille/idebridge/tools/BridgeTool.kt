@@ -41,10 +41,13 @@ object ToolRegistry {
         SaveAllTool,
         RefreshTool,
         DiagnosticsTool,
+        OutlineTool,
         FindUsagesTool,
         RenameSymbolTool,
         MoveFileTool,
         TypeInfoTool,
+        FindImplementationsTool,
+        FindCallersTool,
     )
 
     fun all(): List<BridgeTool> = tools
