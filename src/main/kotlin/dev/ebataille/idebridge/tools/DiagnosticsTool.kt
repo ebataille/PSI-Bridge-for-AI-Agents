@@ -60,12 +60,22 @@ object DiagnosticsTool : BridgeTool {
     /** Past this point, better to return the other diagnostics than to block on tsserver. */
     private const val TYPESCRIPT_TIMEOUT_SECONDS = 60L
 
-    /** Extensions for which an answer from the TypeScript service is expected. */
+    /** Extensions for which the TypeScript service is worth asking at all. */
     private val TYPESCRIPT_EXTENSIONS = setOf(
         "ts", "tsx", "mts", "cts",
         "js", "jsx", "mjs", "cjs",
         "vue", "svelte",
     )
+
+    /**
+     * Extensions for which a missing service is a genuine degradation.
+     *
+     * A `.js` or `.mjs` outside any tsconfig has no service, and that is its normal state - saying
+     * so flipped every `scope=open` run to `incomplete` and left the flag permanently on, which
+     * is worse than not raising it at all: a warning that never goes out cannot be read. On a
+     * `.ts` file the same silence is suspicious, so it still counts.
+     */
+    private val TYPESCRIPT_REQUIRED = setOf("ts", "tsx", "mts", "cts")
 
     private val LOG = logger<DiagnosticsTool>()
 
@@ -246,7 +256,11 @@ object DiagnosticsTool : BridgeTool {
                 TypeScriptService.getForFile(project, file)
             } ?: return SourceOutcome(
                 emptyList(),
-                "no TypeScript service is associated with this file",
+                if (file.extension?.lowercase() in TYPESCRIPT_REQUIRED) {
+                    "no TypeScript service is associated with this file"
+                } else {
+                    null
+                },
             )
             // Deliberately the deprecated overload rather than highlightSuspending.
             //
@@ -254,17 +268,15 @@ object DiagnosticsTool : BridgeTool {
             // saveChangedConfigs, and a read action does not survive a suspension: wrapping the
             // call site cannot help. The platform's own callers reach it from an annotator that
             // already holds read intent, which a request served on a pooled HTTP thread does not.
-            // Calling it from here throws on every file of a real project.
             //
-            // So: the request goes out the way a highlighting pass would - from the EDT, since
-            // otherwise it blocks against the write lock, and under an explicit read action,
-            // which the EDT no longer grants implicitly. Waiting for the result stays off the EDT.
-            var future: Future<List<JSAnnotationError>>? = null
-            ApplicationManager.getApplication().invokeAndWait {
-                ApplicationManager.getApplication().runReadAction {
-                    future = service.highlight(psiFile)
+            // Posted off the EDT, under a read action. Until 2025.2 the opposite was required -
+            // the EDT, or the call blocked against the write lock - and 2026.2 inverted it:
+            // `highlight` now throws "forbidden on EDT because it does not pump the event queue".
+            // The wait happens outside the read action, so the lock is not held while blocking.
+            val future: Future<List<JSAnnotationError>>? =
+                ReadAction.compute<Future<List<JSAnnotationError>>?, RuntimeException> {
+                    service.highlight(psiFile)
                 }
-            }
             future?.get(TYPESCRIPT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 ?: return SourceOutcome(
                     emptyList(),

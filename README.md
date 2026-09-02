@@ -132,11 +132,15 @@ Documented here because they cost hours and are not in any documentation:
 - **`runMainPasses` does not run the TypeScript pass.** It gives you syntax and inspections on a
   closed file, but no type errors — precisely what you wanted to stop running `tsc` for. The
   TypeScript service has to be queried separately.
-- **The TypeScript service needs all three of**: the request posted from the EDT (otherwise it
-  blocks against the write lock and times out), under an explicit read action (the EDT no longer
-  grants one implicitly as of 2025.2), and the file open on the IDE side. On a closed file the
-  request simply never answers, until an internal timeout. The plugin opens the file without focus
-  and closes it afterwards.
+- **The TypeScript service needs the file open on the IDE side.** On a closed file the request
+  simply never answers, until an internal timeout. The plugin opens the file without focus and
+  closes it afterwards.
+- **Where `highlight` may be called from inverted between 2025.2 and 2026.2.** It used to require
+  the EDT, or it blocked against the write lock; 2026.2 forbids the EDT outright — *"this method
+  is forbidden on EDT because it does not pump the event queue"*. It now goes out off the EDT
+  under a read action, with the wait outside that action so the lock is not held while blocking.
+  Both versions were "obviously" right at the time, which is the point: this constraint has to be
+  re-tested on every major upgrade, not reasoned about.
 - **`highlightSuspending` cannot replace that**, even though it is the modern API and the
   `CompletableFuture` overload is deprecated. It asserts read access *after* its first suspension
   point, inside `saveChangedConfigs`, and a read action does not survive a suspension — so
@@ -159,6 +163,13 @@ idebridge status=ok|incomplete errors=<n> total=<n> files=<analysed>/<requested>
 `status=incomplete` means at least one source could not answer — the absence of diagnostics is
 then **not** a clearance, and the response says so in full before listing anything. The hook keys
 off this line rather than off prose.
+
+The flag is only worth anything if it goes out. An early version raised it whenever a file had no
+TypeScript service, which on any real project meant permanently: one `.mjs` outside every
+`tsconfig` among twenty open files was enough, and "genuine tsserver outage" became
+indistinguishable from "somebody left a config file open". A file the service does not cover is
+now a normal state, not a degradation — the flag is reserved for `.ts` and friends, where silence
+really is suspicious.
 
 This matters more than it looks. A tool that answers "no problems" when it checked nothing is
 worse than no tool at all — it is the central flaw of the official integration, and the status
