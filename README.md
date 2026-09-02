@@ -161,12 +161,14 @@ few words.
 
 ## Requirements
 
-- WebStorm 2025.2+ (or another IDE bundling the JavaScript plugin)
+- WebStorm 2026.2+ (or another IDE bundling the JavaScript plugin)
 - An MCP client — Claude Code, or any other
 - Node.js, for the setup and hook scripts (already present if you run Claude Code)
 
-No system JDK needed to build: `build.sh` falls back to the JBR shipped with a locally installed
-JetBrains IDE, which is a full JDK 21. Set `JAVA_HOME` to override.
+No system JDK needed to build. Gradle resolves the JDK 25 the toolchain asks for and downloads
+it when the machine has none, so the build no longer depends on one happening to be installed —
+which stops being true the moment an IDE upgrade replaces its bundled JBR. `build.sh` still
+honours `JAVA_HOME`, and still borrows a local JetBrains JBR when it fits.
 
 ## Install
 

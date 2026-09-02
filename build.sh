@@ -15,7 +15,7 @@ find_jdk() {
     "/c/Program Files/JetBrains"/*/jbr \
     "/Applications"/*.app/Contents/jbr/Contents/Home \
     "$HOME/.jdks"/* \
-    "/usr/lib/jvm"/*21* ; do
+    "/usr/lib/jvm"/*25* ; do
     if [ -x "$candidate/bin/java" ] || [ -x "$candidate/bin/java.exe" ]; then
       echo "$candidate"
       return 0
@@ -29,7 +29,7 @@ if [ -z "${JAVA_HOME:-}" ]; then
     export JAVA_HOME
     echo "build.sh: using JDK at $JAVA_HOME" >&2
   else
-    echo "build.sh: no JDK 21 found. Set JAVA_HOME, or install any JetBrains IDE (its bundled" >&2
+    echo "build.sh: no JDK 25 found. Set JAVA_HOME, or let Gradle fetch one: the foojay" >&2
     echo "          JBR is a full JDK and will be picked up automatically)." >&2
     exit 1
   fi

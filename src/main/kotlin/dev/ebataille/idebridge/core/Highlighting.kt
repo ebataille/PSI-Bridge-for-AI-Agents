@@ -6,9 +6,6 @@ import com.intellij.codeInsight.daemon.impl.DaemonProgressIndicator
 import com.intellij.codeInsight.daemon.impl.HighlightInfo
 import com.intellij.codeInsight.daemon.impl.HighlightingSessionImpl
 import com.intellij.codeInsight.intention.IntentionAction
-import com.intellij.codeInsight.multiverse.CodeInsightContext
-import com.intellij.codeInsight.multiverse.CodeInsightContextManager
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
@@ -23,6 +20,11 @@ import com.intellij.psi.PsiFile
  * analysis to re-resolve a fix against the current text: a `HighlightInfo` holds absolute offsets,
  * so it is stale the moment anything is edited, and caching it between the two calls would apply
  * fixes at the wrong place.
+ *
+ * `runInsideHighlightingSession` is the API that broke on the 2025.2 -> 2026.2 upgrade: it lost
+ * its `CodeInsightContext` parameter, and the whole inspection half of `get_diagnostics` went
+ * with it. Recheck this call on every major IDE upgrade - it has no compatibility guarantee, and
+ * the callers depend on the failure being reported rather than swallowed.
  */
 object Highlighting {
 
@@ -37,16 +39,12 @@ object Highlighting {
         // The passes look for the highlighting session attached to the current indicator: outside
         // an editor nobody created one, so we open it ourselves. And runMainPasses rejects any
         // indicator that is not a DaemonProgressIndicator.
-        val insightContext = ReadAction.compute<CodeInsightContext, RuntimeException> {
-            CodeInsightContextManager.getInstance(project).getCodeInsightContext(psiFile.viewProvider)
-        }
         val indicator = DaemonProgressIndicator()
         var infos: List<HighlightInfo> = emptyList()
         ProgressManager.getInstance().runProcess(
             {
                 HighlightingSessionImpl.runInsideHighlightingSession(
                     psiFile,
-                    insightContext,
                     null,
                     ProperTextRange(0, document.textLength),
                     false,
