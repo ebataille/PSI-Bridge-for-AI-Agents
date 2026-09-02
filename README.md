@@ -132,11 +132,18 @@ Documented here because they cost hours and are not in any documentation:
 - **`runMainPasses` does not run the TypeScript pass.** It gives you syntax and inspections on a
   closed file, but no type errors — precisely what you wanted to stop running `tsc` for. The
   TypeScript service has to be queried separately.
-- **The TypeScript service needs the file open on the IDE side.** On a closed file the request
-  simply never answers, until an internal timeout. The plugin opens the file without focus and
-  closes it afterwards. Until 2026.2 it also had to post the request from the EDT under an
-  explicit read action, or it blocked against the write lock; `highlightSuspending` removed that
-  dance.
+- **The TypeScript service needs all three of**: the request posted from the EDT (otherwise it
+  blocks against the write lock and times out), under an explicit read action (the EDT no longer
+  grants one implicitly as of 2025.2), and the file open on the IDE side. On a closed file the
+  request simply never answers, until an internal timeout. The plugin opens the file without focus
+  and closes it afterwards.
+- **`highlightSuspending` cannot replace that**, even though it is the modern API and the
+  `CompletableFuture` overload is deprecated. It asserts read access *after* its first suspension
+  point, inside `saveChangedConfigs`, and a read action does not survive a suspension — so
+  wrapping the call site achieves nothing. The platform's own callers reach it from an annotator
+  that already holds read intent; a request served on a pooled HTTP thread does not. Switching to
+  it looked like a clean modernisation, compiled without a warning, worked on a three-file fixture,
+  and threw on every file of a real project.
 - **Refactorings only touch in-memory documents.** The first working version cheerfully reported
   "6 references updated" while the disk was untouched. Every refactoring now ends with an explicit
   save.
@@ -310,9 +317,16 @@ skills/     idebridge/SKILL.md  when to prefer these tools, and when not to
   2026.2 upgrade proved both halves of that: `runInsideHighlightingSession` lost a parameter and
   took every IDE inspection down with it, and the status line said so instead of reporting a
   broken file as clean.
-- TypeScript 7 arrives as an **LSP** service, not as a faster tsserver, so the type-error half of
-  `get_diagnostics` goes through `highlightSuspending`. Both service implementations expose it;
-  the older `CompletableFuture` overload is a deprecated shim this plugin no longer calls.
+- TypeScript 7 arrives as an **LSP** service, not as a faster tsserver. Both implementations —
+  the classic `TypeScriptServerServiceImpl` and the LSP one — still expose the deprecated
+  `highlight` overload this plugin calls, so TS7 projects are covered; see above for why the
+  suspending replacement is not usable from here.
+- Markdown and other prose files are **excluded from the symbolic scopes**. They only reach the
+  analyser through language injection, which parses ```ts blocks in documentation as real
+  TypeScript and reports every deliberately partial snippet as an error — 65 of 70 on one real
+  project. Pass such a file in `paths` to analyse it anyway.
+- `changed` and `open` are both restricted to the project content roots, so a file opened from
+  outside the project does not leak into a scope the model reads as "the project".
 - One IDE per project: the descriptor is rewritten on each start.
 - The descriptor holds a secret token. Keep `.claude/ide-bridge.json` out of version control
   (it is only exploitable from the local machine, but there is no reason to publish it).

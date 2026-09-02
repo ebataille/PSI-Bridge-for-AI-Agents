@@ -3,6 +3,7 @@ package dev.ebataille.idebridge.tools
 import com.google.gson.JsonObject
 import com.intellij.codeInsight.daemon.impl.HighlightInfo
 import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.lang.javascript.integration.JSAnnotationError
 import com.intellij.lang.typescript.compiler.TypeScriptService
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
@@ -22,9 +23,8 @@ import dev.ebataille.idebridge.core.Locations
 import dev.ebataille.idebridge.core.Scopes
 import dev.ebataille.idebridge.server.Args
 import dev.ebataille.idebridge.server.Schema
-import kotlin.time.Duration.Companion.seconds
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 
 /**
  * IDE diagnostics over an explicit set of files.
@@ -43,6 +43,16 @@ import kotlinx.coroutines.withTimeoutOrNull
 object DiagnosticsTool : BridgeTool {
 
     private const val MAX_FILES = 60
+
+    /**
+     * Analysed on request, never by default.
+     *
+     * Markdown only reaches the analyser through language injection: the ```ts blocks in
+     * documentation are parsed as real TypeScript, and every deliberately partial snippet comes
+     * back as an error. On one real project that was 65 of 70 reported errors, which buries the
+     * five that mattered.
+     */
+    private val PROSE_EXTENSIONS = setOf("md", "mdx", "markdown", "txt", "rst", "adoc")
 
     /** Past two or three, the fix list is noise the model has to read on every diagnostic. */
     private const val MAX_FIXES_PER_ROW = 3
@@ -229,25 +239,37 @@ object DiagnosticsTool : BridgeTool {
         }
 
         val errors = try {
-            val service = TypeScriptService.getForFile(project, file)
-                ?: return SourceOutcome(
-                    emptyList(),
-                    "no TypeScript service is associated with this file",
-                )
-            // TypeScript 7 ships as an LSP service rather than as a faster tsserver, and LSP
-            // clients on this platform are coroutine-based: highlightSuspending is the real
-            // entry point, and the CompletableFuture overload is a shim for callers that have
-            // not moved. Going through the suspending one also drops the EDT round trip the
-            // future-based call needed to avoid blocking against the write lock.
-            runBlocking {
-                withTimeoutOrNull(TYPESCRIPT_TIMEOUT_SECONDS.seconds) {
-                    service.highlightSuspending(psiFile)
-                }
+            // getForFile resolves the file through the PSI, so it needs read access like any
+            // other PSI call. The assertion behind it is a soft one, which is why this went
+            // unnoticed: it logs the violation instead of failing.
+            val service = ReadAction.compute<TypeScriptService?, RuntimeException> {
+                TypeScriptService.getForFile(project, file)
             } ?: return SourceOutcome(
                 emptyList(),
-                "the TypeScript service returned nothing for this file (no answer within " +
-                    "${TYPESCRIPT_TIMEOUT_SECONDS}s, or it declined to analyse it)",
+                "no TypeScript service is associated with this file",
             )
+            // Deliberately the deprecated overload rather than highlightSuspending.
+            //
+            // The suspending one asserts read access *after* its first suspension point, in
+            // saveChangedConfigs, and a read action does not survive a suspension: wrapping the
+            // call site cannot help. The platform's own callers reach it from an annotator that
+            // already holds read intent, which a request served on a pooled HTTP thread does not.
+            // Calling it from here throws on every file of a real project.
+            //
+            // So: the request goes out the way a highlighting pass would - from the EDT, since
+            // otherwise it blocks against the write lock, and under an explicit read action,
+            // which the EDT no longer grants implicitly. Waiting for the result stays off the EDT.
+            var future: Future<List<JSAnnotationError>>? = null
+            ApplicationManager.getApplication().invokeAndWait {
+                ApplicationManager.getApplication().runReadAction {
+                    future = service.highlight(psiFile)
+                }
+            }
+            future?.get(TYPESCRIPT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                ?: return SourceOutcome(
+                    emptyList(),
+                    "the service did not accept the request for this file",
+                )
         } catch (e: Throwable) {
             LOG.info("TypeScript service unavailable on ${file.path}: ${e.javaClass.simpleName}")
             return SourceOutcome(
@@ -294,12 +316,18 @@ object DiagnosticsTool : BridgeTool {
     }
 
     private fun targets(context: ToolContext, args: JsonObject): List<VirtualFile> {
-        return Scopes.resolve(
+        val explicit = Args.stringList(args, "paths")
+        val resolved = Scopes.resolve(
             context.project,
-            Args.stringList(args, "paths"),
+            explicit,
             Args.string(args, "scope"),
             MAX_FILES,
         )
+        // An explicit path is an explicit request: only the symbolic scopes get filtered.
+        if (explicit.isNotEmpty()) {
+            return resolved
+        }
+        return resolved.filter { it.extension?.lowercase() !in PROSE_EXTENSIONS }
     }
 
     private fun render(

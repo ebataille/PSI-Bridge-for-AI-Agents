@@ -38,7 +38,10 @@ object Scopes {
                 .take(maxFiles)
         }
 
-        val open = FileEditorManager.getInstance(project).openFiles.toList()
+        // Editors hold whatever the user last opened, a downloaded XML in ~/Downloads included.
+        // `changed` was already restricted to the content roots; `open` has to mean the same
+        // thing, or a scope the model treats as "the project" quietly reaches outside it.
+        val open = inContent(project, FileEditorManager.getInstance(project).openFiles.toList())
         if (scope == "open") {
             return open.take(maxFiles)
         }
@@ -49,6 +52,13 @@ object Scopes {
         // An empty changeset is the normal state right after a commit: falling back to the open
         // files keeps the tool useful instead of answering "nothing to do".
         return open.take(maxFiles)
+    }
+
+    private fun inContent(project: Project, files: List<VirtualFile>): List<VirtualFile> {
+        val index = ProjectFileIndex.getInstance(project)
+        return ReadAction.compute<List<VirtualFile>, RuntimeException> {
+            files.filter { it.isValid && !it.isDirectory && index.isInContent(it) }
+        }
     }
 
     private fun changed(project: Project): List<VirtualFile> {
