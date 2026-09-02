@@ -55,7 +55,7 @@ structural.
 
 | Tool | What it replaces |
 |---|---|
-| `get_diagnostics` | `tsc --noEmit` — type errors (real `TS****` codes from tsserver), syntax errors, **plus** the IDE inspections tsc cannot see. Incremental, the service is already warm, and it analyses files that are **not open**. Each diagnostic also carries the IDE quick fixes available on it. |
+| `get_diagnostics` | `tsc --noEmit` — type errors (real `TS****` codes from tsserver), syntax errors, **plus** the IDE inspections tsc cannot see. Incremental once the service is warm - the first call on a cold workspace is slower than `tsc` - and it analyses files that are **not open**. Each diagnostic also carries the IDE quick fixes available on it. |
 | `get_outline` | reading a 2000-line file to find one function. Returns the Structure view as text — symbols and their line ranges — for a few hundred tokens, so the next read is an `offset`/`limit` over the twenty lines that matter. |
 | `find_usages` | `grep` on a symbol name — resolved references, aliases and imports included, no homonyms from other modules, no hits in comments. |
 | `find_implementations` | `find_usages` when the question is "what implements this" — goes through the type hierarchy instead of drowning the four implementors in imports and annotations. |
@@ -86,6 +86,73 @@ The batch tools (`get_diagnostics`, `get_outline`, `optimize_imports`, `format_c
 resolved identically everywhere — `changed` means the current VCS changeset. One call is meant to
 carry one complete intent: a tool that makes the model iterate, paginate or call back to refine
 costs more round trips than it saves, and a round trip is the expensive unit here, not the edit.
+
+---
+
+## What it actually costs
+
+Measured on a 518-file TypeScript monorepo, not reasoned about. Read the method before the
+numbers: token counts are `chars ÷ 3.7`, an order of magnitude rather than an exact figure; the
+MCP timings are bracketed by two clocks with the caller's own generation latency subtracted, so
+±1 s; and it is **one run per measurement** except `tsc` (two: 8.2 s / 10.3 s). Variance is not
+characterised.
+
+**A — "I changed a file, is it clean?"** (probe with four real violations)
+
+| | calls | time | output |
+|---|---|---|---|
+| without — `tsc --noEmit` + `eslint <file>` | 2 | 6.9 s + 7.3 s = **14.2 s** | 817 ch ≈ 220 tok |
+| with — `get_diagnostics` | 1 | **3.9 s warm**, 19.6 s cold | 1 759 ch ≈ 475 tok |
+
+One call replaces two, and it does return ESLint, Prettier, TypeScript and the IDE inspections
+together. But it costs **2.2× more tokens**, because of the `fix:` lines — those only pay for
+themselves if you go on to call `apply_quick_fix`; pass `with_fixes: false` when you are just
+checking. And on a workspace whose TypeScript service is not loaded yet, the first call is
+19.6 s — slower than `tsc` over the whole monorepo. The gain exists in a warm session only.
+
+**B — "who calls `EntityMapper.toRecord`?"** (84 files contain `toRecord`, across ≥12 distinct classes)
+
+| | time | output | answer |
+|---|---|---|---|
+| without — `grep -rn -w toRecord` | **0.28 s** | 19 993 ch ≈ 5 403 tok | 195 hits / 84 files — **wrong** |
+| with — `find_usages` | 2.6 s | 1 181 ch ≈ 319 tok | 10 refs / 8 files — right |
+
+The plugin is **ten times slower here** and seventeen times cheaper. The grep is wrong in both
+directions: it drowns 10 true positives in 185 false ones, and no refinement of the pattern finds
+the `super.toRecord()` calls or the indirect constructions — that needs type resolution.
+
+**C — "understand a 1 420-line file"** (48.6 kB)
+
+| situation | route | output |
+|---|---|---|
+| you do not know what is in it | full read | 54 638 ch ≈ 14 767 tok |
+| | `get_outline` depth 1 | 1 189 ch ≈ 321 tok — **46× less** |
+| | `get_outline` depth 2 | ~9 500 ch ≈ 2 567 tok — 5.7× less |
+| you already know you want one method | `grep -n` + read lines 961-1095 | 5 956 ch ≈ 1 609 tok |
+| | outline depth 2 + the same read | 15 254 ch ≈ 4 122 tok — **2.6× more** |
+
+Depth 1 is nearly free but unusable on this file: the class comes back as a single `396-1420`
+line, so there is nothing to navigate to. Depth 2 navigates, and unpacks every field of 34
+interfaces on the way. **On a target you have already identified, `grep -n` plus a range read
+beats the outline.**
+
+### What this adds up to
+
+| task | time | tokens |
+|---|---|---|
+| Diagnostics on a changed file | 3.6× faster (warm) | 0.45× — **a loss** |
+| Finding the references of a symbol | 0.1× — **a loss** | 17× |
+| Exploring an unfamiliar file | ≈ neutral | 5.7× to 46× |
+| Reaching an already-identified method | ≈ neutral | 0.4× — **a loss** |
+
+There is no uniform gain, and the two columns do not point the same way. **The plugin buys
+correctness, not speed and not tokens.** The one large, unambiguous token win is `find_usages`,
+and it comes from grep answering a different question than the one asked.
+
+On top of this sits a fixed cost the benchmark does not show: **17 tool schemas, roughly 3 200
+tokens of resident context** unless your client loads them on demand. A session with two or three
+calls does not repay that; a refactoring session chaining `find_usages` and `rename_symbol` repays
+it many times over.
 
 ---
 

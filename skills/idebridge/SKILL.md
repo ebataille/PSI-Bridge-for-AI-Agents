@@ -24,9 +24,10 @@ types, not textual matches.
 | Remove dead code                    | `safe_delete`                          | deleting the lines and hoping               |
 | Tidy up before committing           | `optimize_imports` + `format_code` with `scope: changed` | doing it by hand          |
 
-The two rows that change the most are the first and the last: reading an outline before a file is
-where the token budget is won, and running the style tools on `scope: changed` is what keeps the
-diff reviewable.
+`get_outline` is for a file whose contents you do not know: measured at 46× fewer tokens than
+reading it, at depth 1. It is **not** the way to reach a symbol you have already identified —
+there, `grep -n` plus a range read is 2.6× cheaper than the outline plus the same read. Running
+the style tools on `scope: changed` is what keeps the diff reviewable.
 
 ## Limits — do not over-apply
 
@@ -71,3 +72,6 @@ src/order/service.ts:7:9   warning   Unused constant total
 
 Those `fix:` lines are what `apply_quick_fix` takes, at the `file` and `line` of their diagnostic.
 Send several in one call — one round trip for N fixes is the entire point of the tool.
+
+They are not free: they roughly double the size of the response. When you only want to know
+whether a file is clean and have no intention of applying anything, pass `with_fixes: false`.
