@@ -3,7 +3,6 @@ package dev.ebataille.idebridge.tools
 import com.google.gson.JsonObject
 import com.intellij.codeInsight.daemon.impl.HighlightInfo
 import com.intellij.lang.annotation.HighlightSeverity
-import com.intellij.lang.javascript.integration.JSAnnotationError
 import com.intellij.lang.typescript.compiler.TypeScriptService
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
@@ -23,8 +22,9 @@ import dev.ebataille.idebridge.core.Locations
 import dev.ebataille.idebridge.core.Scopes
 import dev.ebataille.idebridge.server.Args
 import dev.ebataille.idebridge.server.Schema
-import java.util.concurrent.Future
-import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * IDE diagnostics over an explicit set of files.
@@ -234,20 +234,20 @@ object DiagnosticsTool : BridgeTool {
                     emptyList(),
                     "no TypeScript service is associated with this file",
                 )
-            // The request has to be posted the way a highlighting pass would: from the EDT
-            // (otherwise it blocks against the write lock and times out) and under a read action,
-            // which the EDT no longer grants implicitly. Waiting for the result stays off the EDT.
-            var future: Future<List<JSAnnotationError>>? = null
-            ApplicationManager.getApplication().invokeAndWait {
-                ApplicationManager.getApplication().runReadAction {
-                    future = service.highlight(psiFile)
+            // TypeScript 7 ships as an LSP service rather than as a faster tsserver, and LSP
+            // clients on this platform are coroutine-based: highlightSuspending is the real
+            // entry point, and the CompletableFuture overload is a shim for callers that have
+            // not moved. Going through the suspending one also drops the EDT round trip the
+            // future-based call needed to avoid blocking against the write lock.
+            runBlocking {
+                withTimeoutOrNull(TYPESCRIPT_TIMEOUT_SECONDS.seconds) {
+                    service.highlightSuspending(psiFile)
                 }
-            }
-            future?.get(TYPESCRIPT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                ?: return SourceOutcome(
-                    emptyList(),
-                    "the service did not accept the request for this file",
-                )
+            } ?: return SourceOutcome(
+                emptyList(),
+                "the TypeScript service returned nothing for this file (no answer within " +
+                    "${TYPESCRIPT_TIMEOUT_SECONDS}s, or it declined to analyse it)",
+            )
         } catch (e: Throwable) {
             LOG.info("TypeScript service unavailable on ${file.path}: ${e.javaClass.simpleName}")
             return SourceOutcome(

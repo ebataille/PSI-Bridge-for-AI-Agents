@@ -132,10 +132,11 @@ Documented here because they cost hours and are not in any documentation:
 - **`runMainPasses` does not run the TypeScript pass.** It gives you syntax and inspections on a
   closed file, but no type errors — precisely what you wanted to stop running `tsc` for. The
   TypeScript service has to be queried separately.
-- **tsserver needs all three of**: the request posted from the EDT, under an explicit read action
-  (the EDT no longer grants one implicitly as of 2025.2), and the file open on the IDE side. On a
-  closed file the request simply never answers, until an 18-second internal timeout. The plugin
-  opens the file without focus and closes it afterwards.
+- **The TypeScript service needs the file open on the IDE side.** On a closed file the request
+  simply never answers, until an internal timeout. The plugin opens the file without focus and
+  closes it afterwards. Until 2026.2 it also had to post the request from the EDT under an
+  explicit read action, or it blocked against the write lock; `highlightSuspending` removed that
+  dance.
 - **Refactorings only touch in-memory documents.** The first working version cheerfully reported
   "6 references updated" while the disk was untouched. Every refactoring now ends with an explicit
   save.
@@ -233,49 +234,19 @@ Verify with `/mcp` — you should see **16 tools** under `idebridge`.
 
 Registering the server is not enough. A model reaches for `grep` and `sed` because that is what it
 has always had; the tool descriptions push back, but the instruction file is what actually decides.
-Paste this into your `CLAUDE.md` (project or global) — or the equivalent for your client:
 
-````markdown
-## IDE tools — MCP `idebridge`
+[`skills/idebridge/SKILL.md`](skills/idebridge/SKILL.md) is that instruction file, and it is the
+canonical guidance: a need → tool → instead-of table, plus the half that matters more — the limits
+that stop the tools being over-applied, because a rule that fires everywhere produces `find_usages`
+calls hunting for a config key. Install it whichever way suits your client:
 
-When `idebridge` is connected, **its tools come before their shell or generic equivalents**. They
-run on the IDE index and the already-warm language service: they see resolved references and real
-types, not textual matches.
-
-| Need                                | Use                                    | Instead of                                  |
-| ----------------------------------- | -------------------------------------- | ------------------------------------------- |
-| Understand a file you have not read | `get_outline`, then read the lines it returns | reading the whole file                |
-| Type errors, inspections            | `get_diagnostics`                      | `tsc --noEmit`, `eslint`                    |
-| Fix an error the IDE already flags  | `apply_quick_fix` (batch several)      | editing each error by hand                  |
-| References to a symbol              | `find_usages`                          | `grep` on the name                          |
-| Concrete implementations            | `find_implementations`                 | `find_usages` on an interface               |
-| Who calls this, transitively        | `find_callers`                         | chaining `find_usages` level by level       |
-| Signature, inferred type            | `get_type_info`                        | reading the code and deducing               |
-| Rename a symbol                     | `rename_symbol`                        | `sed`, or one `Edit` per file               |
-| Reshape an expression project-wide  | `structural_replace` (`dry_run` first) | `grep` followed by a series of edits        |
-| Move or rename a file               | `move_file`                            | `mv` / `git mv`, which break the imports    |
-| Remove dead code                    | `safe_delete`                          | deleting the lines and hoping               |
-| Tidy up before committing           | `optimize_imports` + `format_code` with `scope: changed` | doing it by hand          |
-
-Limits — do not over-apply:
-
-- `grep` is still the right tool for what is **not a symbol**: string literals, config keys,
-  `.json` / `.md` / `.yml`, TODOs, exploratory search.
-- `sed` / `mv` stay legitimate **outside source code** (generated files, fixtures, scripts) and for
-  bulk substitutions that are not a symbol rename.
-- `structural_replace` is **not** a rename: it rewrites the matched expressions and leaves the
-  declaration and the imports alone. Use `rename_symbol` when the target is a symbol.
-- The `PostToolUse` hook already reports diagnostics after `Edit` / `Write`: do not re-run
-  `get_diagnostics` on the same file without a reason. Do run it after `rename_symbol`,
-  `move_file`, `apply_quick_fix` or `structural_replace`, which the hook does not cover.
-- Unsure whether the tools are usable (IDE closed, indexing in progress) → `ide_status` before
-  concluding that one is broken.
-- If `idebridge` is not connected, fall back to the shell equivalents without asking.
-````
-
-The two rows that change the most are the first and the last: reading an outline before a file is
-where the token budget is won, and running the style tools on `scope: changed` is what keeps the
-diff reviewable.
+- **Claude Code** — copy the folder into `~/.claude/skills/` for every project, or into
+  `.claude/skills/` for one.
+- **WebStorm 2026.2+** — the skill manager can pull from a public GitHub repository, and imports
+  the skills you already configured for Claude Code.
+- **Neither** — paste the file's body into your `CLAUDE.md`. It is written to work as either, and
+  it is deliberately the only copy: guidance duplicated between a skill, a `CLAUDE.md` and the tool
+  descriptions diverges within a release or two.
 
 ### If your agent runs in WSL
 
@@ -306,6 +277,7 @@ core/       BridgeService       token -> project registry; the token is the secr
 tools/      one file per tool
 startup/    BridgeStartup       publishes .claude/ide-bridge.json on open
 hooks/      ide-sync.mjs        both hooks; setup-claude.mjs installs everything
+skills/     idebridge/SKILL.md  when to prefer these tools, and when not to
 ```
 
 ## Known limitations
@@ -334,7 +306,13 @@ hooks/      ide-sync.mjs        both hooks; setup-claude.mjs installs everything
 - `find_callers` reports `(module level)` when a reference sits outside any named function.
 - `HighlightingSessionImpl`, `runMainPasses` and the TypeScript service are internal platform
   APIs with no compatibility guarantee — recheck on every major IDE upgrade. Each call is
-  isolated, so a signature change degrades one source rather than breaking the tool.
+  isolated, so a signature change degrades one source rather than breaking the tool. The 2025.2 →
+  2026.2 upgrade proved both halves of that: `runInsideHighlightingSession` lost a parameter and
+  took every IDE inspection down with it, and the status line said so instead of reporting a
+  broken file as clean.
+- TypeScript 7 arrives as an **LSP** service, not as a faster tsserver, so the type-error half of
+  `get_diagnostics` goes through `highlightSuspending`. Both service implementations expose it;
+  the older `CompletableFuture` overload is a deprecated shim this plugin no longer calls.
 - One IDE per project: the descriptor is rewritten on each start.
 - The descriptor holds a secret token. Keep `.claude/ide-bridge.json` out of version control
   (it is only exploitable from the local machine, but there is no reason to publish it).

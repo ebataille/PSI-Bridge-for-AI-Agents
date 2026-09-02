@@ -12,7 +12,7 @@ group = "dev.ebataille"
 // --tags` is enough to ship 0.3.0: no commit whose only purpose is to bump a number, and no
 // release zip labelled with the previous version because the bump was forgotten. This constant
 // stays the version local builds carry.
-val declaredVersion = "0.2.1"
+val declaredVersion = "0.3.0"
 version = System.getenv("GITHUB_REF_NAME")
     ?.takeIf { it.matches(Regex("""v\d+\.\d+\.\d+.*""")) }
     ?.removePrefix("v")
